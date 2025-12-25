@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Camera, Receipt, X, Check, Calendar } from "lucide-react";
+import { Camera, Receipt, X, Check, Calendar, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CategoryBadge } from "@/components/expense/CategoryBadge";
@@ -9,8 +9,15 @@ import { getCategories, getSettings, saveExpense } from "@/lib/storage";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
 
 type Mode = "quick" | "receipt";
+
+interface OcrResult {
+  merchant: string | null;
+  date: string | null;
+  total: number | null;
+}
 
 export default function AddExpense() {
   const navigate = useNavigate();
@@ -29,13 +36,80 @@ export default function AddExpense() {
   const [receiptImage, setReceiptImage] = useState<string | null>(null);
   
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isProcessingOcr, setIsProcessingOcr] = useState(false);
+  const [ocrApplied, setOcrApplied] = useState(false);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const processReceiptWithOcr = async (imageBase64: string) => {
+    setIsProcessingOcr(true);
+    
+    try {
+      const { data, error } = await supabase.functions.invoke('ocr-receipt', {
+        body: { imageBase64 }
+      });
+
+      if (error) {
+        console.error('OCR error:', error);
+        toast.error("Couldn't read receipt", {
+          description: "Please enter the details manually"
+        });
+        return;
+      }
+
+      if (data?.success && data?.data) {
+        const result: OcrResult = data.data;
+        let fieldsExtracted = 0;
+
+        if (result.total && result.total > 0) {
+          setAmount(result.total.toString());
+          fieldsExtracted++;
+        }
+        
+        if (result.merchant) {
+          setMerchant(result.merchant);
+          fieldsExtracted++;
+        }
+        
+        if (result.date) {
+          // Validate date format
+          const parsedDate = new Date(result.date);
+          if (!isNaN(parsedDate.getTime())) {
+            setDate(format(parsedDate, "yyyy-MM-dd"));
+            fieldsExtracted++;
+          }
+        }
+
+        if (fieldsExtracted > 0) {
+          setOcrApplied(true);
+          toast.success("Receipt scanned!", {
+            description: `Extracted ${fieldsExtracted} field${fieldsExtracted > 1 ? 's' : ''}. Please verify and select a category.`
+          });
+        } else {
+          toast.info("Couldn't extract details", {
+            description: "Please enter the information manually"
+          });
+        }
+      } else if (data?.error) {
+        toast.error(data.error);
+      }
+    } catch (err) {
+      console.error('OCR processing error:', err);
+      toast.error("Failed to process receipt");
+    } finally {
+      setIsProcessingOcr(false);
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        setReceiptImage(reader.result as string);
+      reader.onloadend = async () => {
+        const imageData = reader.result as string;
+        setReceiptImage(imageData);
+        setOcrApplied(false);
+        
+        // Automatically trigger OCR
+        await processReceiptWithOcr(imageData);
       };
       reader.readAsDataURL(file);
     }
@@ -146,9 +220,30 @@ export default function AddExpense() {
                 alt="Receipt"
                 className="w-full h-48 object-cover"
               />
+              
+              {/* OCR Status Overlay */}
+              {isProcessingOcr && (
+                <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2">
+                  <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                  <p className="text-sm font-medium text-foreground">Reading receipt...</p>
+                </div>
+              )}
+              
+              {/* OCR Success Badge */}
+              {ocrApplied && !isProcessingOcr && (
+                <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2.5 py-1 bg-success text-success-foreground rounded-full text-xs font-medium">
+                  <Sparkles className="w-3 h-3" />
+                  AI extracted
+                </div>
+              )}
+              
               <button
-                onClick={() => setReceiptImage(null)}
+                onClick={() => {
+                  setReceiptImage(null);
+                  setOcrApplied(false);
+                }}
                 className="absolute top-2 right-2 p-2 bg-card/90 backdrop-blur-sm rounded-full shadow-md"
+                disabled={isProcessingOcr}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -163,7 +258,7 @@ export default function AddExpense() {
               </div>
               <div className="text-center">
                 <p className="font-medium text-foreground">Upload Receipt</p>
-                <p className="text-xs text-muted-foreground">Tap to take a photo or choose from gallery</p>
+                <p className="text-xs text-muted-foreground">AI will extract merchant, date & total</p>
               </div>
             </button>
           )}
@@ -256,7 +351,7 @@ export default function AddExpense() {
         variant="gradient"
         size="lg"
         className="w-full"
-        disabled={!canSubmit || isSubmitting}
+        disabled={!canSubmit || isSubmitting || isProcessingOcr}
         onClick={handleSubmit}
       >
         {isSubmitting ? (

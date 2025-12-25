@@ -1,0 +1,4 @@
+project_id = "apckidluztketnjmexhx"
+
+[functions.ocr-receipt]
+verify_jwt = false
